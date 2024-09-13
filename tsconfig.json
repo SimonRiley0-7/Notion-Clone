@@ -12,6 +12,11 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
+    "types": [
+      // ...
+      "@blocknote/core",
+      "@blocknote/react"
+    ],
     "plugins": [
       {
         "name": "next"
