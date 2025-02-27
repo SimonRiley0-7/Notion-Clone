@@ -1,83 +1,174 @@
 import { Block, BlockNoteEditor, PartialBlock } from "@blocknote/core";
 import { BlockNoteView } from "@blocknote/mantine";
 import { useTheme } from "next-themes";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/core/style.css";
 import "@blocknote/react/style.css";
 import "@blocknote/mantine/style.css";
 import { useEdgeStore } from "@/lib/edgestore";
 
-async function saveToStorage(jsonBlocks: Block[]) {
-  // Save contents to local storage. You might want to debounce this or replace
-  // with a call to your API / database.
-  localStorage.setItem("editorContent", JSON.stringify(jsonBlocks));
-}
-
-async function loadFromStorage() {
-  // Gets the previously stored editor contents.
-  const storageString = localStorage.getItem("editorContent");
-  return storageString ? (JSON.parse(storageString) as PartialBlock[]) : undefined;
-}
-
-function clearStorage() {
-  localStorage.removeItem("editorContent");
-}
-
 interface EditorProps {
   onChange: (value: string) => void;
-  initialContent?: string;
+  initialContent: string;
   editable?: boolean;
   newPage?: boolean;
 }
 
-const Editor = ({ onChange, initialContent, editable, newPage }: EditorProps) => {
+const Editor = ({ onChange, initialContent, editable = true, newPage = false }: EditorProps) => {
   const { resolvedTheme } = useTheme();
   const { edgestore } = useEdgeStore();
-  const [initialContentState, setInitialContentState] = useState<PartialBlock[] | undefined | "loading">("loading");
-
+  const [editor, setEditor] = useState<BlockNoteEditor | null>(null);
+  const [loading, setLoading] = useState(true);
+  
+  // For tracking update source and preventing loops
+  const isUpdatingRef = useRef(false);
+  const lastContentRef = useRef("");
+  
   const handleUpload = async (file: File) => {
     const response = await edgestore.publicFiles.upload({ file });
     return response.url;
   };
-
-  // Loads the previously stored editor contents.
+  
+  // Function to safely parse content
+  const getSafeInitialBlocks = (): PartialBlock[] => {
+    if (!initialContent || initialContent === "") {
+      console.log("No initial content, using default empty paragraph");
+      return [{ type: "paragraph", content: [] }];
+    }
+    
+    try {
+      const parsedContent = JSON.parse(initialContent);
+      
+      // Validate the parsed content
+      if (Array.isArray(parsedContent) && parsedContent.length > 0) {
+        // Make sure every block has required properties
+        const validBlocks = parsedContent.filter(block => {
+          return block && typeof block === 'object' && block.type;
+        });
+        
+        if (validBlocks.length > 0) {
+          // Store the valid content
+          lastContentRef.current = JSON.stringify(validBlocks);
+          return validBlocks;
+        }
+      }
+      
+      console.warn("Parsed content was not valid, using default");
+    } catch (error) {
+      console.warn("Failed to parse initial content:", error);
+    }
+    
+    // Default fallback
+    return [{ type: "paragraph", content: [] }];
+  };
+  
+  // Create editor only once
   useEffect(() => {
-    if (newPage) {
-      clearStorage();
-      setInitialContentState([]);
-    } else {
-      loadFromStorage().then((content) => {
-        setInitialContentState(content || []);
+    // Skip if already initialized
+    if (editor) return;
+    
+    try {
+      console.log("Initializing BlockNote editor");
+      const safeBlocks = getSafeInitialBlocks();
+      console.log("Initial blocks:", safeBlocks);
+      
+      const newEditor = BlockNoteEditor.create({
+        initialContent: safeBlocks,
+        uploadFile: handleUpload,
       });
+      
+      setEditor(newEditor);
+      setLoading(false);
+    } catch (error) {
+      console.error("Failed to create editor:", error);
+      setLoading(false);
     }
-  }, [newPage]);
-
-  // Creates a new editor instance.
-  const editor = useMemo(() => {
-    if (initialContentState === "loading") {
-      return undefined;
-    }
-    return BlockNoteEditor.create({
-      initialContent: initialContentState && initialContentState.length > 0 
-        ? initialContentState 
-        : [{ type: "paragraph", content: "" }],
-      uploadFile: handleUpload
+  }, []);
+  
+  // Set up change handler once editor is available
+  useEffect(() => {
+    if (!editor) return;
+    
+    const unsubscribe = editor.onEditorContentChange(() => {
+      if (isUpdatingRef.current) return;
+      
+      try {
+        const blocks = editor.topLevelBlocks;
+        
+        // Skip empty or invalid blocks
+        if (!blocks || blocks.length === 0) {
+          console.warn("Editor returned empty blocks, not updating");
+          return;
+        }
+        
+        const jsonContent = JSON.stringify(blocks);
+        
+        // Only trigger if content actually changed
+        if (jsonContent !== lastContentRef.current) {
+          lastContentRef.current = jsonContent;
+          console.log("Content changed, length:", jsonContent.length);
+          onChange(jsonContent);
+        }
+      } catch (error) {
+        console.error("Error in content change handler:", error);
+      }
     });
-  }, [initialContentState]);
-
-  // Ensure the onChange effect runs only when the editor is ready
-
-  if (initialContentState === "loading" || !editor) {
-    return "Loading content...";
+    
+    return unsubscribe;
+  }, [editor, onChange]);
+  
+  // Handle external content updates
+  useEffect(() => {
+    if (!editor || !initialContent || initialContent === lastContentRef.current) {
+      return;
+    }
+    
+    try {
+      console.log("Attempting to update editor with external content");
+      const parsedContent = JSON.parse(initialContent);
+      
+      if (Array.isArray(parsedContent) && parsedContent.length > 0) {
+        console.log("Updating editor content from props");
+        
+        // Prevent change handler from firing during update
+        isUpdatingRef.current = true;
+        
+        // Use a try/finally to ensure flag is reset
+        try {
+          editor.replaceBlocks(editor.topLevelBlocks, parsedContent);
+          lastContentRef.current = initialContent;
+        } catch (error) {
+          console.error("Error replacing blocks:", error);
+        } finally {
+          // Reset after a short delay to let React finish rendering
+          setTimeout(() => {
+            isUpdatingRef.current = false;
+          }, 50);
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to update editor with external content:", error);
+    }
+  }, [initialContent, editor]);
+  
+  if (loading) {
+    return <div className="p-4 text-center">Initializing editor...</div>;
   }
-
+  
+  if (!editor) {
+    return <div className="p-4 text-center bg-yellow-100 rounded">Failed to load editor. Please refresh the page.</div>;
+  }
+  
   return (
-    <BlockNoteView
-      editor={editor}
-      editable={editable}
-      theme={resolvedTheme === "dark" ? "dark" : "light"}
-    />
+    <div className="editor-container">
+      <BlockNoteView
+        editor={editor}
+        editable={editable}
+        theme={resolvedTheme === "dark" ? "dark" : "light"}
+      />
+    </div>
   );
 };
+
 export default Editor;

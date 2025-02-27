@@ -84,6 +84,7 @@ export const create = mutation({
       userId,
       isArchived: false,
       isPublished: false,
+      content: "", // Initialize content field with empty string
     });
     return document;
   },
@@ -215,32 +216,64 @@ export const getById = query({
 
 export const update = mutation({
   args:{
-    id:v.id("documents"),
+    id: v.id("documents"),
     title: v.optional(v.string()),
-    content:v.optional(v.string()),
+    content: v.optional(v.string()),
     coverImage: v.optional(v.string()),
-    icon:v.optional(v.string()),
-    isPublished:v.optional(v.boolean()),
+    icon: v.optional(v.string()),
+    isPublished: v.optional(v.boolean()),
   },
-  handler:async(ctx, args)=> {
+  handler: async(ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if(!identity) {
       throw new Error("You must be logged in");
     }
     const userId = identity.subject;
-    const {id,...rest}=args;
-    const exisitingDocument = await ctx.db.get(args.id);
-    if(!exisitingDocument) {
+    
+    // Get existing document
+    const existingDocument = await ctx.db.get(args.id);
+    if(!existingDocument) {
       throw new Error("Not found");
     }
-    if(exisitingDocument.userId!==userId) {
+    if(existingDocument.userId !== userId) {
       throw new Error("Unauthorized");
     }
-    const document = await ctx.db.patch(args.id, {
-      ...rest,
-    });
-    return document;
     
+    // Create update object
+    const updates: any = {};
+    
+    // Only include fields that are provided
+    if (args.title !== undefined) updates.title = args.title;
+    
+    // Validate content is valid JSON before saving
+    if (args.content !== undefined) {
+      try {
+        // Check if it can be parsed as JSON (validation step)
+        JSON.parse(args.content);
+        
+        // Log content update
+        console.log(`Updating document ${args.id} with content (length: ${args.content.length})`);
+        
+        updates.content = args.content;
+      } catch (e) {
+        console.error("Invalid JSON content:", e);
+        throw new Error("Content must be valid JSON");
+      }
+    }
+    
+    if (args.coverImage !== undefined) updates.coverImage = args.coverImage;
+    if (args.icon !== undefined) updates.icon = args.icon;
+    if (args.isPublished !== undefined) updates.isPublished = args.isPublished;
+    
+    // Only perform update if there are fields to update
+    if (Object.keys(updates).length === 0) {
+      return existingDocument;
+    }
+    
+    // Apply the updates
+    const document = await ctx.db.patch(args.id, updates);
+    
+    return document;
   },
 })
 
